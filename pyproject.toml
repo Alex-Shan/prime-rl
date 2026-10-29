@@ -8,7 +8,7 @@ dependencies = [
     "prime-rl-configs",
     "prime-pydantic-config>=0.4.3",
     "beartype>=0.21.0",
-    "datasets>=4.0.0",
+    "datasets>=5.0.0",
     "jaxtyping>=0.3.2",
     "loguru>=0.7.3",
     "numpy>=2.2.6",
@@ -166,15 +166,15 @@ override-dependencies = [
 # `uv sync --all-packages`.
 [tool.uv.workspace]
 members = [
-    "deps/prime-envs/environments/*/*",
-    "deps/verifiers/environments/alphabet_sort",
-    "deps/verifiers/environments/color_codeword",
-    "deps/verifiers/environments/gsm8k",
-    "deps/verifiers/environments/kuhn_poker",
-    "deps/verifiers/environments/proposer_solver",
-    "deps/verifiers/environments/reverse_text",
-    "deps/verifiers/environments/wiki_search",
-    "deps/verifiers/environments/wordle",
+    # "deps/prime-envs/environments/*/*",
+    # "deps/verifiers/environments/alphabet_sort",
+    # "deps/verifiers/environments/color_codeword",
+    # "deps/verifiers/environments/gsm8k",
+    # "deps/verifiers/environments/kuhn_poker",
+    # "deps/verifiers/environments/proposer_solver",
+    # "deps/verifiers/environments/reverse_text",
+    # "deps/verifiers/environments/wiki_search",
+    # "deps/verifiers/environments/wordle",
 ]
 # Tau tasksets require litellm<1.82.7, while Harbor requires litellm>=1.92.0.
 # Apex pins a verifiers git revision instead of the editable workspace member.
@@ -182,12 +182,12 @@ members = [
 # IFBench requires setuptools<78, while vLLM 0.32.0 requires setuptools>=78.1.1.
 # A workspace shares one lock, so these packages need separate environments.
 exclude = [
-    "deps/prime-envs/environments/if/ifbench",
-    "deps/prime-envs/environments/office/ale_cli",
-    "deps/prime-envs/environments/tool_use/tau2_bench",
-    "deps/prime-envs/environments/tool_use/tau2_synth",
-    "deps/prime-envs/environments/tool_use/tau3_bench",
-    "deps/prime-envs/environments/tool_use/apex_agents",
+    # "deps/prime-envs/environments/if/ifbench",
+    # "deps/prime-envs/environments/office/ale_cli",
+    # "deps/prime-envs/environments/tool_use/tau2_bench",
+    # "deps/prime-envs/environments/tool_use/tau2_synth",
+    # "deps/prime-envs/environments/tool_use/tau3_bench",
+    # "deps/prime-envs/environments/tool_use/apex_agents",
 ]
 
 # ModelExpress 0.3.0 publishes protobuf<6 metadata, but its generated proto is
