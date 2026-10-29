@@ -1,9 +1,3 @@
-[submodule "verifiers"]
-	path = deps/verifiers
-	url = git@github.com:PrimeIntellect-ai/verifiers.git
-[submodule "renderers"]
-	path = deps/renderers
-	url = git@github.com:PrimeIntellect-ai/renderers.git
 [submodule "prime-envs"]
 	path = deps/prime-envs
 	url = git@github.com:PrimeIntellect-ai/prime-envs.git
@@ -13,3 +7,11 @@
 [submodule "prime-kernels"]
 	path = deps/prime-kernels
 	url = https://github.com/PrimeIntellect-ai/prime-kernels
+[submodule "deps/verifiers"]
+	path = deps/verifiers
+	url = https://github.com/Alex-Shan/verifiers.git
+	branch = feat/gepa_v2_1
+[submodule "deps/renderers"]
+	path = deps/renderers
+	url = https://github.com/Alex-Shan/renderers.git
+	branch = feat/gepa_v2_1
