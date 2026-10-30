@@ -439,6 +439,9 @@ class BaseOptimizerConfig(BaseConfig):
 class AdamWConfig(BaseOptimizerConfig):
     type: Literal["adamw"] = "adamw"
 
+    offload_bucket_bytes: int | None = Field(None, ge=1)
+    """Maximum resident Adam state bytes per GPU update bucket; requires model.offload='optimizer'."""
+
     betas1: float = Field(0.9, ge=0)
     """Adam first-moment (β1) decay."""
 
@@ -638,6 +641,13 @@ class BaseTrainerConfig(BaseConfig):
     def full_optimizer_offload_requires_supported_optimizer(self):
         if self.model.offload == "full" and self.optim.type not in ("adamw", "sign_sgd"):
             raise ValueError("Full optimizer offload only supports AdamW and SignSGD")
+        return self
+
+    @model_validator(mode="after")
+    def validate_optimizer_state_buckets(self):
+        if isinstance(self.optim, AdamWConfig) and self.optim.offload_bucket_bytes is not None:
+            if self.model.offload != "optimizer":
+                raise ValueError("optim.offload_bucket_bytes requires model.offload='optimizer'")
         return self
 
     @model_validator(mode="after")

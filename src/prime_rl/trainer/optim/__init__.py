@@ -5,7 +5,7 @@ from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.optim import AdamW, Optimizer
 
-from prime_rl.configs.trainer import OffloadMode, OptimizerConfig
+from prime_rl.configs.trainer import AdamWConfig, OffloadMode, OptimizerConfig
 from prime_rl.trainer.models.fusions import get_model_packed_parameters
 from prime_rl.trainer.optim.base import OffloadOptimizer as OffloadOptimizer
 from prime_rl.trainer.optim.base import OptimizerLike
@@ -57,6 +57,9 @@ def setup_optimizer(
 ) -> tuple[OptimizerLike, GradientOffloadManager | None]:
     cpu_offload = offload == "optimizer"
     full_offload = offload == "full"
+    bucket_bytes = config.offload_bucket_bytes if isinstance(config, AdamWConfig) else None
+    if bucket_bytes is not None and not cpu_offload:
+        raise ValueError("optim.offload_bucket_bytes requires model.offload='optimizer'")
     if full_offload and config.type not in ("adamw", "sign_sgd"):
         raise ValueError("Full optimizer offload only supports AdamW and SignSGD")
     if full_offload and config.max_norm is not None:
@@ -93,7 +96,7 @@ def setup_optimizer(
 
     if cpu_offload:
         get_logger().info("Wrapping optimizer with CPUOffloadOptimizer for optimizer state CPU offloading")
-        return CPUOffloadOptimizer(optimizer), None
+        return CPUOffloadOptimizer(optimizer, bucket_bytes=bucket_bytes), None
 
     return optimizer, None
 
