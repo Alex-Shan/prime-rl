@@ -355,6 +355,28 @@ if torch_version_at_least("2.10.0") and has_triton():
         rowwise_sf = torch.empty((M // 128, N // 64, 32, 16), dtype=torch.float8_e4m3fn, device=A.device)
 
         try:
+            if stochastic_rounding:
+                from .quantize_sr import quantize_sr_small_kernel
+
+                quantize_sr_small_kernel[(M // 16, N // 128)](
+                    A,
+                    B,
+                    col_global_amax,
+                    row_global_amax,
+                    colwise_C,
+                    colwise_sf,
+                    rowwise_C,
+                    rowwise_sf,
+                    _col_seed,
+                    _col_offset,
+                    _row_seed,
+                    _row_offset,
+                    M=M,
+                    N=N,
+                    num_warps=4,
+                )
+                return colwise_C, colwise_sf, rowwise_C, rowwise_sf
+
             _hadamard_quantize_row_col_kernel[(NUM_SMS,)](
                 A,
                 B,

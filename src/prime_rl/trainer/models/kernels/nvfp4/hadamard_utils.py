@@ -169,6 +169,7 @@ if has_triton():
         seed_ptr,
         offset_base_ptr,
         tile_id,
+        logical_indices=None,
     ):
         """Pack scaled float32 values to FP4 with optional stochastic rounding.
 
@@ -184,7 +185,10 @@ if has_triton():
             offset_base = tl.load(offset_base_ptr).to(tl.uint64) & 0xFFFFFFFF
             local_n = tl.arange(0, BLOCK_N)[:, None]
             local_m = tl.arange(0, BLOCK_M)[None, :]
-            linear_idx = tile_id.to(tl.uint64) * (BLOCK_N * BLOCK_M) + local_n * BLOCK_M + local_m
+            if logical_indices is None:
+                linear_idx = tile_id.to(tl.uint64) * (BLOCK_N * BLOCK_M) + local_n * BLOCK_M + local_m
+            else:
+                linear_idx = logical_indices
             uniform = tl.rand(seed, (linear_idx << 32) | offset_base)
             magnitude = tl.minimum(tl.abs(scaled), 6.0)
             lower = tl.where(

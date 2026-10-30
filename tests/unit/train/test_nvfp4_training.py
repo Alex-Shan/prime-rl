@@ -57,20 +57,28 @@ def test_nvfp4_meta_parameters_and_selection():
     assert model.mlp.gate_proj._sr_seed.item() == model.mlp.gate_proj.sr_seed
 
 
-@pytest.mark.parametrize("compiled", [False, True])
-def test_nvfp4_forward_backward_padding_and_checkpoint(compiled):
+@pytest.mark.parametrize("compile_mode", [None, "default", "reduce-overhead"])
+def test_nvfp4_forward_backward_padding_and_checkpoint(compile_mode):
     if torch.cuda.get_device_capability() != (12, 0):
         pytest.skip("SM120 only")
     torch.manual_seed(123)
     linear = NVFP4Linear.from_linear(
         torch.nn.Linear(512, 512, device="cuda", dtype=torch.bfloat16), name="mlp.up_proj", seed=42
     )
-    model = torch.compile(linear) if compiled else linear
+    model = torch.compile(linear, mode=compile_mode) if compile_mode else linear
     x = torch.randn(1, 129, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    y = checkpoint(model, x, use_reentrant=False)
-    y.float().square().mean().backward()
-    assert y.shape == (1, 129, 512)
-    assert y.isfinite().all() and x.grad.isfinite().all() and linear.weight.grad.isfinite().all()
+    gradients = []
+    for _ in range(3):
+        torch.compiler.cudagraph_mark_step_begin()
+        linear.zero_grad(set_to_none=True)
+        x.grad = None
+        y = checkpoint(model, x, use_reentrant=False)
+        y.float().square().mean().backward()
+        assert y.shape == (1, 129, 512)
+        assert y.isfinite().all() and x.grad.isfinite().all() and linear.weight.grad.isfinite().all()
+        gradients.append(linear.weight.grad.detach().cpu().clone())
+        del y
+    assert not torch.equal(gradients[0], gradients[1]), "stochastic rounding reused a fixed stream"
 
 
 def test_software_rounding_is_unbiased_and_reproducible():
@@ -130,3 +138,79 @@ def test_bucket_groups_scheduler_and_missing_gradients():
         assert all(g["params"] is old for g, old in zip(wrapped.param_groups, original))
     with pytest.raises(ValueError, match="exceeds bucket_bytes"):
         CPUOffloadOptimizer(make_optimizer(params), bucket_bytes=1)
+
+
+@pytest.mark.parametrize(
+    "shape,distribution", [((128, 128), "zero"), ((256, 384), "normal"), ((1024, 256), "outliers")]
+)
+def test_nvfp4_sr_tiles_preserve_codes_scales_and_philox(shape, distribution):
+    import triton
+
+    from prime_rl.trainer.models.kernels.nvfp4.hadamard_amax_triton import triton_rht_amax
+    from prime_rl.trainer.models.kernels.nvfp4.hadamard_quantize_row_col_triton import (
+        _hadamard_quantize_row_col_kernel,
+        triton_rht_quantize_row_col,
+    )
+    from prime_rl.trainer.models.kernels.nvfp4.hadamard_utils import (
+        _device_key,
+        get_rht_matrix,
+        prepare_for_cuda_graph,
+    )
+
+    if torch.cuda.get_device_capability() != (12, 0):
+        pytest.skip("SM120 only")
+    torch.manual_seed(123)
+    m, n = shape
+    x = torch.randn(m, n, device="cuda", dtype=torch.bfloat16)
+    if distribution == "zero":
+        x.zero_()
+    elif distribution == "outliers":
+        x[::17] *= 1000
+        x[1::23] *= 0.00001
+    signs = tuple(1 if i % 3 else -1 for i in range(16))
+    seed = torch.tensor([-123456789], device="cuda", dtype=torch.int64)
+    col_offset = torch.tensor([2**32 - 1], device="cuda", dtype=torch.int64)
+    row_offset = torch.tensor([0], device="cuda", dtype=torch.int64)
+    col_amax, row_amax = triton_rht_amax(x, sign_vector=list(signs))
+    hadamard = get_rht_matrix(signs, _device_key(x.device), torch.bfloat16, 16)
+    workspace = prepare_for_cuda_graph(x.device, sign_vectors=(signs,))
+    expected = (
+        torch.empty(n, m // 2, device="cuda", dtype=torch.uint8),
+        torch.empty(n // 128, m // 64, 32, 16, device="cuda", dtype=torch.float8_e4m3fn),
+        torch.empty(m, n // 2, device="cuda", dtype=torch.uint8),
+        torch.empty(m // 128, n // 64, 32, 16, device="cuda", dtype=torch.float8_e4m3fn),
+    )
+    sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+    triton.set_allocator(lambda size, align, stream: workspace[: max(size, 1)])
+    try:
+        _hadamard_quantize_row_col_kernel[(sms,)](
+            x,
+            hadamard,
+            col_amax,
+            row_amax,
+            *expected,
+            seed,
+            col_offset,
+            seed ^ 1,
+            row_offset,
+            m,
+            n,
+            GROUP_SIZE_N=8,
+            NUM_SMS=sms,
+            STOCHASTIC_ROUNDING=True,
+        )
+    finally:
+        triton.set_allocator(None)
+    actual = triton_rht_quantize_row_col(
+        x,
+        col_amax,
+        row_amax,
+        list(signs),
+        True,
+        col_seed_base=seed,
+        col_offset_base=col_offset,
+        row_seed_base=seed ^ 1,
+        row_offset_base=row_offset,
+    )
+    for old, new in zip(expected, actual):
+        assert torch.equal(old.view(torch.uint8), new.view(torch.uint8))
