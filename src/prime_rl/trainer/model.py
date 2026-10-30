@@ -35,6 +35,7 @@ from prime_rl.configs.trainer import (
     FP8Config,
     ModelConfig,
     MXFP8Config,
+    NVFP4Config,
     TokenizerConfig,
 )
 from prime_rl.multimodal import ForwardPolicy
@@ -60,6 +61,7 @@ from prime_rl.trainer.models.layers.fp8_linear import replace_linear_with_fp8_bl
 from prime_rl.trainer.models.layers.lm_head import inject_prime_lm_head
 from prime_rl.trainer.models.layers.moe import MoE
 from prime_rl.trainer.models.layers.mxfp8_linear import replace_linear_with_mxfp8_linear
+from prime_rl.trainer.models.layers.nvfp4_linear import initialize_nvfp4_runtime, replace_linear_with_nvfp4_linear
 from prime_rl.trainer.models.qwen3_8_flash_next.indexer import SparseAttentionIndexer
 from prime_rl.trainer.models.qwen3_8_flash_next.ngram_embedding import NGramEmbedding
 from prime_rl.trainer.moe_runtime import configure_moe_runtime
@@ -797,7 +799,13 @@ def apply_quantization(model: nn.Module, config: ModelConfig) -> None:
         return
 
     ignore_modules = quant.ignore_patterns + quant.extra_ignore_patterns
-    if isinstance(quant, FP8Config):
+    if isinstance(quant, NVFP4Config):
+        if torch.cuda.get_device_capability() != (12, 0):
+            raise ValueError("NVFP4 software stochastic rounding currently requires an SM120 GPU")
+        if config.lora is not None:
+            raise ValueError("NVFP4 training currently supports full-parameter training only")
+        replace_linear_with_nvfp4_linear(model, quant)
+    elif isinstance(quant, FP8Config):
         capability = torch.cuda.get_device_capability()
         if capability[0] not in (9, 10):
             raise ValueError(
@@ -955,6 +963,7 @@ def setup_model(
     else:
         load_dcp_from_hf(model, config)
 
+    initialize_nvfp4_runtime(model)
     _reset_runtime_moe_buffers(model)
     return model
 

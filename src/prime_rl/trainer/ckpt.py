@@ -24,6 +24,7 @@ from prime_rl.trainer.models.fusions import (
     split_packed_optimizer_state_for_checkpoint,
     write_back_loaded_packed_optimizer_state,
 )
+from prime_rl.trainer.models.layers.nvfp4_linear import NVFP4Linear
 from prime_rl.trainer.optim import OffloadOptimizer, OptimizerLike
 from prime_rl.trainer.utils import get_dcp_group
 from prime_rl.trainer.world import get_world
@@ -203,6 +204,15 @@ class CheckpointManager:
         # Save sharded state
         dcp_save(state_dict, checkpoint_id=path, process_group=get_dcp_group())
 
+        if any(isinstance(module, NVFP4Linear) for module in model.modules()):
+            rng_dir = path / "nvfp4_rng"
+            if self.world.is_master:
+                rng_dir.mkdir(parents=True, exist_ok=True)
+            torch.distributed.barrier(group=get_dcp_group())
+            torch.save(
+                {"cpu": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state()},
+                rng_dir / f"rank_{self.world.rank}.pt",
+            )
         self.logger.debug(f"Saved training checkpoint in {format_time(time.perf_counter() - start_time)}")
 
     def load_from_path(
@@ -246,6 +256,14 @@ class CheckpointManager:
                     )
             dataloader.load_state_dict(torch.load(dataloader_path, weights_only=False))
 
+        if any(isinstance(module, NVFP4Linear) for module in model.modules()):
+            rng_dir = path / "nvfp4_rng"
+            if rng_dir.exists():
+                rng = torch.load(rng_dir / f"rank_{self.world.rank}.pt", weights_only=True, map_location="cpu")
+                torch.set_rng_state(rng["cpu"])
+                torch.cuda.set_rng_state(rng["cuda"])
+            else:
+                self.logger.warning("Checkpoint has no NVFP4 RNG state; starting a fresh stochastic-rounding stream")
         self.logger.debug(f"Loaded training checkpoint in {format_time(time.perf_counter() - start_time)}")
 
     def load(

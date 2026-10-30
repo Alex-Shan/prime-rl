@@ -140,7 +140,19 @@ class MXFP8Config(BaseConfig):
     """Patterns appended to `ignore_patterns`, to exclude model-specific modules while keeping the defaults."""
 
 
-QuantizationConfig: TypeAlias = Annotated[FP8Config | MXFP8Config, Field(discriminator="type")]
+class NVFP4Config(BaseConfig):
+    type: Literal["nvfp4"] = "nvfp4"
+    seed: int = Field(42, ge=0, lt=2**63)
+    """Seed for deterministic per-module RHT bases and software stochastic rounding."""
+
+    include_patterns: list[str] = [r"(?:^|\.)mlp\.(?:gate_proj|up_proj|down_proj)$"]
+    """Dense language-model MLP projections to run with SM120 NVFP4 GEMMs."""
+
+    ignore_patterns: list[str] = _DEFAULT_FP8_IGNORE_PATTERNS
+    extra_ignore_patterns: list[str] = []
+
+
+QuantizationConfig: TypeAlias = Annotated[FP8Config | MXFP8Config | NVFP4Config, Field(discriminator="type")]
 
 
 class MoEComputeConfigBase(BaseConfig):
