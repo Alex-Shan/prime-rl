@@ -59,3 +59,35 @@ The kernels are derived from TorchAO 0.18.0, commit `5f2baf9`, under BSD-3-Claus
 see `src/prime_rl/trainer/models/kernels/nvfp4/LICENSE`. Changes include software
 stochastic rounding and project-local imports. The installed environment is not
 patched.
+
+## Performance validation
+
+Stochastic quantization uses a small 16x128 tile on SM120, retaining the RHT,
+block scales and the original 128x128 tile's per-element Philox counters.
+The non-stochastic forward path retains its TMA kernel. Both paths preserve
+the packed tensor layout and BF16 parameter/checkpoint interfaces.
+
+Compare outputs and warmed timing with the original reference:
+
+```sh
+uv run python tools/benchmark_nvfp4_sr.py 8192 17408 --iterations 20 --output /tmp/nvfp4-sr.json
+```
+
+Profile a warmed step of a standalone trainer fake-data config:
+
+```sh
+CUDA_VISIBLE_DEVICES=0,1 uv run torchrun --standalone --nproc-per-node=2 tools/profile_training_step.py /tmp/trainer.json /tmp/nvfp4-profile --step 3
+uv run python tools/analyze_training_trace.py /tmp/nvfp4-profile/trace_rank_0.json.gz --output /tmp/nvfp4-summary.json
+```
+
+The config must enable data.fake, set max_steps to at least the selected step,
+and leave trace_path unset. The driver instruments runtime dispatch in its own
+process, including compiled calls and checkpoint recompute; it does not change
+model precision, checkpoint policy or offload settings. It uses private PyTorch
+2.13 profiler/checkpoint APIs.
+
+CPU scope durations include enqueue, synchronization and waiting. GPU activity
+durations may overlap across streams. Recompute is nested in backward and
+includes some quantization and communication, so its duration must not be added
+to those categories. NCCL kernel time includes waiting and is not pure transfer
+time.
