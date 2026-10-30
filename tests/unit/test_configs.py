@@ -1361,3 +1361,18 @@ def test_score_centering_captures_complete_bounded_support(top_k, top_p):
     assert config.inference.vllm.max_logprobs >= top_k + 2
     assert config.inference.enable_return_sampling_mask
     assert RLConfig.model_validate_json(config.model_dump_json()) == config
+
+
+@pytest.mark.parametrize("offload", ["none", "full"])
+def test_bucket_offload_requires_optimizer_mode(offload):
+    with pytest.raises(ValidationError, match="offload_bucket_bytes requires"):
+        TrainerConfig(model={"offload": offload}, optim={"offload_bucket_bytes": 4096})
+
+
+def test_nvfp4_config_keeps_training_dtypes():
+    config = TrainerConfig(model={"optimization_dtype": "bfloat16", "reduce_dtype": "bfloat16",
+                                  "quantization": {"type": "nvfp4"}},
+                           optim={"offload_bucket_bytes": 4294967296})
+    assert config.model.optimization_dtype == config.model.reduce_dtype == "bfloat16"
+    assert config.model.quantization.type == "nvfp4"
+    assert config.optim.max_norm == 1.0
