@@ -46,16 +46,16 @@ BINDING_FRACTION = 0.9
 """The cap counts as binding when inflight reaches this fraction of it."""
 
 
-KV_USAGE_SOFT_CAP = 0.8
+KV_USAGE_SOFT_CAP = 0.9
 """Above this usage, soft-trim: lower the cap and let completions drain the
 pool naturally — no work is cancelled."""
 
-KV_USAGE_HARD_CAP = 0.9
+KV_USAGE_HARD_CAP = 0.95
 """Above this usage, hard-trim: in-place context growth is outpacing
 completions despite the closed gate, so also cancel the pool excess before
 thrash onset (a cliff, not a slope)."""
 
-KV_USAGE_TARGET = 0.7
+KV_USAGE_TARGET = 0.85
 """A trim resizes to inflight * target / usage — below the trigger, so pool growth has headroom before the next trim."""
 
 KV_TRIM_COOLDOWN_POLLS = 6
