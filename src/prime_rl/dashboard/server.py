@@ -132,6 +132,30 @@ def register_dirs(dirs: list[Path]) -> None:
 
 isolated = False
 
+# HERO: only runs under this project's outputs are listed, labelled by their path below
+# it. Defaults to <checkout>/outputs/HERO (the checkout this dashboard runs from);
+# PRIME_RL_DASHBOARD_ROOT overrides it, and an empty value turns the scoping off.
+_root_env = os.environ.get("PRIME_RL_DASHBOARD_ROOT")
+PROJECT_ROOT: Path | None = (
+    (Path(_root_env).resolve() if _root_env else None)
+    if _root_env is not None
+    else Path(__file__).resolve().parents[4] / "outputs" / "HERO"
+)
+
+
+def in_project(path: Path) -> bool:
+    return PROJECT_ROOT is None or path.resolve().is_relative_to(PROJECT_ROOT)
+
+
+def run_label(run_dir: Path) -> str:
+    """The run's path below the project root (its dir name when unscoped)."""
+    if PROJECT_ROOT is not None:
+        try:
+            return str(run_dir.resolve().relative_to(PROJECT_ROOT))
+        except ValueError:
+            pass
+    return run_dir.name
+
 
 def tracked_dirs() -> list[Path]:
     """One dashboard per user serves everything: the dirs it was started with
@@ -145,28 +169,57 @@ def tracked_dirs() -> list[Path]:
     return dirs
 
 
+MAX_SCAN_DEPTH = 6
+
+
+def walk_run_dirs(root: Path, depth: int = 0):
+    """Every run dir anywhere below the project root, found fresh on each scan, so a
+    renamed or moved folder shows up at its new path without re-registering it. A run
+    dir is not descended into (its checkpoints and logs hold no runs)."""
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+            continue
+        path = Path(entry.path)
+        if is_run_dir(path):
+            yield path
+        elif depth < MAX_SCAN_DEPTH:
+            yield from walk_run_dirs(path, depth + 1)
+
+
 def scan_runs() -> dict[str, Path]:
     global _run_registry
     by_name: dict[str, list[Path]] = {}
-    for base in tracked_dirs():
-        if not base.is_dir():
-            continue
-        for run_dir in sorted(base.iterdir()):
-            if is_run_dir(run_dir):
-                by_name.setdefault(run_dir.name, []).append(run_dir)
+    if PROJECT_ROOT is not None:
+        # scoped to the project: walk its tree instead of trusting registered dirs,
+        # which go stale the moment a parent folder is renamed
+        candidates = list(walk_run_dirs(PROJECT_ROOT))
+    else:
+        candidates = [d for base in tracked_dirs() if base.is_dir() for d in sorted(base.iterdir()) if is_run_dir(d)]
+    for run_dir in candidates:
+        by_name.setdefault(run_dir.name, []).append(run_dir)
     registry: dict[str, Path] = {}
     for name, dirs in by_name.items():
         if len(dirs) == 1:
             registry[name] = dirs[0]
         else:
-            for run_dir in dirs:
-                registry[f"{run_dir.parent.name}:{name}"] = run_dir  # ":" survives a URL path segment, "/" does not
+            qualified = {run_dir: f"{run_dir.parent.name}:{name}" for run_dir in dirs}
+            for run_dir, run_id in qualified.items():
+                if list(qualified.values()).count(run_id) > 1:
+                    digest = hashlib.sha256(str(run_dir.resolve()).encode()).hexdigest()[:12]
+                    run_id = f"{run_id}:{digest}"
+                registry[run_id] = run_dir
     _run_registry = registry
     return registry
 
 
 def get_run_dir(run: str) -> Path:
-    run_dir = _run_registry.get(run) or scan_runs().get(run)
+    run_dir = _run_registry.get(run)
+    if run_dir is None or not run_dir.is_dir():  # unknown, or its folder was renamed/moved
+        run_dir = scan_runs().get(run)
     if run_dir is None or not run_dir.is_dir():
         raise HTTPException(404, f"run {run} not found")
     return run_dir
@@ -353,6 +406,8 @@ def run_meta(run_dir: Path) -> dict:
     platform = orjson.loads(platform_path.read_bytes()) if platform_path.is_file() else None
     return {
         "name": run_dir.name,
+        "label": run_label(run_dir),
+        "path": str(run_dir.resolve()),
         "type": run_type,
         "finished": finished,
         "eval_plan": eval_plan,
@@ -381,7 +436,7 @@ def list_runs() -> dict:
         meta = run_meta(run_dir)
         meta["name"] = run_id
         runs.append(meta)
-    runs.sort(key=lambda r: r["mtime"], reverse=True)
+    runs.sort(key=lambda r: (r["label"], r["path"]))
     return {"output_dir": ", ".join(str(d.resolve()) for d in output_dirs), "runs": runs}
 
 
@@ -2248,7 +2303,7 @@ def main() -> None:
         # this instance's dirs join the per-user registry, and it serves the union -
         # one dashboard per host per user covers every run
         register_dirs(output_dirs)
-    if not tracked_dirs():
+    if not tracked_dirs() and not (PROJECT_ROOT and PROJECT_ROOT.is_dir()):
         raise SystemExit("no existing output dir given" + ("" if isolated else " (and none registered)"))
     set_proc_title("Dashboard")
     port = free_port(args.host, args.port)

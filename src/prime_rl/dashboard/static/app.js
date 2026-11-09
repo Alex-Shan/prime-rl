@@ -137,13 +137,16 @@ const emptyState = (title, detail = "") =>
 
 async function loadRuns() {
   const data = await api("/api/runs");
-  state.runs = data.runs;
+  state.runs = data.runs.sort((a, b) =>
+    (a.label || a.name).localeCompare(b.label || b.name, "en", { numeric: true }) ||
+    (a.path || a.name).localeCompare(b.path || b.name, "en", { numeric: true })
+  );
   state.outputDir = data.output_dir;
   const sel = $("#run-select");
   const current = state.run;
   sel.disabled = !state.runs.length;
   sel.innerHTML = state.runs.length
-    ? state.runs.map((r) => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join("")
+    ? state.runs.map((r) => `<option value="${esc(r.name)}" title="${esc(r.path || r.name)}">${esc(r.label || r.name)}</option>`).join("")
     : `<option>no runs found</option>`;
   if (current && state.runs.some((r) => r.name === current)) sel.value = current;
   syncDressedSelects();
@@ -162,7 +165,7 @@ function renderCompareMenu() {
         .map(
           (r) =>
             `<label class="file-item"><input type="checkbox" data-compare="${esc(r.name)}"` +
-            `${state.compare.runs.includes(r.name) ? " checked" : ""}><span>${esc(r.name)}</span></label>`
+            `${state.compare.runs.includes(r.name) ? " checked" : ""}><span title="${esc(r.path || r.name)}">${esc(r.label || r.name)}</span></label>`
         )
         .join("")
     : `<div class="muted" style="padding:6px 8px">no other runs</div>`;
@@ -6570,7 +6573,7 @@ function syncDressedSelects() {
     // gives the reason without opening the menu
     const chosenOption = select.selectedOptions[0];
     btn.classList.toggle("unavailable", !!chosenOption?.dataset.reason);
-    btn.title = chosenOption?.dataset.reason ? chosenOption.title : "";
+    btn.title = chosenOption?.dataset.reason || select.id === "run-select" ? chosenOption?.title ?? "" : "";
   }
 }
 
