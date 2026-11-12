@@ -47,7 +47,7 @@ not support closures. Omit the field to use the original offload behavior.
 For HERO's four-card experiment:
 
 ```sh
-CUDA_VISIBLE_DEVICES=2,3,0,1 uv run rl @ ../configs/exp/3_rl/6000d/qwen3.8-27b-nvfp4.toml
+CUDA_VISIBLE_DEVICES=2,3,0,1 uv run rl @ ../configs/exp/4_rl/6000d/qwen3.8-27b.toml
 ```
 
 The launcher assigns inference GPUs first, giving physical GPUs 2/3 to inference
@@ -91,3 +91,47 @@ durations may overlap across streams. Recompute is nested in backward and
 includes some quantization and communication, so its duration must not be added
 to those categories. NCCL kernel time includes waiting and is not pure transfer
 time.
+
+## Full 27B fake-data validation
+
+`configs/debug/fake/nvfp4-27b.toml` loads the full checkpoint at
+`/home/shanxianzheng/Hugging_Face/Models/Qwen/Qwen3.8-27B` with 32K token rows,
+CP=2, BF16 weights/reductions, full activation checkpointing, compilation and
+4 GiB optimizer-state buckets. The final step is checkpointed.
+
+On this RTX 6000D host, default NCCL P2P stalls during communicator setup;
+the two-rank all-reduce succeeds with `NCCL_P2P_DISABLE=1`.
+Export these settings before both trainer-only launches:
+
+```sh
+export CUDA_VISIBLE_DEVICES=0,1 NCCL_P2P_DISABLE=1 NCCL_SOCKET_IFNAME=lo
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,pinned_max_round_threshold_mb:16
+uv run --frozen --no-sync torchrun --standalone --nproc-per-node=2 -m prime_rl.trainer.rl.train @ configs/debug/fake/nvfp4-27b.toml @ configs/debug/fake/nvfp4-27b-offload.toml
+uv run --frozen --no-sync torchrun --standalone --nproc-per-node=2 -m prime_rl.trainer.rl.train @ configs/debug/fake/nvfp4-27b.toml @ configs/debug/fake/nvfp4-27b-offload.toml --max-steps 7 --resume.step 5
+```
+
+When sharing the sibling HERO environment without syncing, also export
+`UV_PROJECT_ENVIRONMENT=../prime-rl/.venv` and
+`PYTHONPATH="$PWD/src:$PWD/packages/prime-rl-configs/src"` from this worktree.
+Verify imported source paths before launching. Random fake-data losses do not
+establish reward quality or convergence.
+
+The base config retains the experiment setting `ac_offloading = "None"`;
+its first 32K backward exhausted the 85,651 MiB devices. Compose the offload
+overlay shown above to enable the default activation offloading and use a
+separate output directory. Model, sequence length and numerical precision are
+unchanged. The default P2P hang and the original OOM logs remain in
+`outputs/nvfp4-fake-27b/`.
+
+Bucketed optimizer checkpoints keep moment tensors on CPU. Packed QKV moments
+use matching Gloo meshes for checkpoint splitting and reconstruction; their
+live CUDA-mesh metadata and update buckets are retained. Checkpoint writes use
+serial CPU staging for bucketed optimizers, avoiding asynchronous GPU-to-CPU
+staging failures after resume. Canonical weight names and mapping.json remain
+available.
+
+The distributed regression can be run without a model training job:
+
+```sh
+uv run --frozen --no-sync torchrun --standalone --nproc-per-node=2 -m pytest tests/unit/train/test_nvfp4_training.py -k fused_offloaded_state -q
+```

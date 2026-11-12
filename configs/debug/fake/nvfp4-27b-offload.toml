@@ -1,0 +1,5 @@
+# Compose after nvfp4-27b.toml: 32K backward otherwise exhausts GPU memory.
+output_dir = "outputs/nvfp4-fake-27b-offload"
+
+[model.ac_offloading]
+max_inflight_activations = 5

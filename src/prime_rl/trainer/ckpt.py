@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.distributed.checkpoint import FileSystemWriter
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     get_state_dict,
@@ -218,7 +219,13 @@ class CheckpointManager:
 
         # Before the sharded state, so the mapping is in place once .metadata appears
         self._save_mapping(path, model)
-        dcp_save(state_dict, checkpoint_id=path, process_group=get_dcp_group())
+        # CPU optimizer buckets already occupy pinned host memory; stage model tensors serially.
+        writer = (
+            FileSystemWriter(path, per_thread_copy_ahead=0)
+            if any(getattr(optimizer, "bucket_bytes", None) is not None for optimizer in optimizers)
+            else None
+        )
+        dcp_save(state_dict, checkpoint_id=path, storage_writer=writer, process_group=get_dcp_group())
 
         if any(isinstance(module, NVFP4Linear) for module in model.modules()):
             rng_dir = path / "nvfp4_rng"

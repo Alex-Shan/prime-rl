@@ -1,9 +1,12 @@
 from collections.abc import Callable, Iterator, Sequence
+from functools import lru_cache
 from typing import Any, NamedTuple
 
 import torch
+import torch.distributed as dist
 from torch import nn
-from torch.distributed.tensor import Shard
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor, Shard
 
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.weights import resolve_fqn
@@ -11,6 +14,39 @@ from prime_rl.utils.weights import resolve_fqn
 # Replaces some of a module's parameters with a packed one. Advertised by modules
 # through their ``supported_fusions``.
 RuntimeFusion = Callable[[nn.Module], None]
+
+
+@lru_cache(maxsize=None)
+def _cpu_checkpoint_mesh(mesh: DeviceMesh) -> DeviceMesh:
+    groups = [
+        dist.new_group(
+            ranks=dist.get_process_group_ranks(mesh.get_group(dim)),
+            backend="gloo",
+            use_local_synchronization=True,
+        )
+        for dim in range(mesh.ndim)
+    ]
+    return DeviceMesh.from_group(
+        groups[0] if mesh.ndim == 1 else groups, "cpu", mesh=mesh.mesh, mesh_dim_names=mesh.mesh_dim_names
+    )
+
+
+def _cpu_checkpoint_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    # Offloaded states retain their CUDA mesh; splitting a sharded packing needs Gloo.
+    if (
+        isinstance(tensor, DTensor)
+        and tensor.to_local().device.type == "cpu"
+        and tensor.device_mesh.device_type != "cpu"
+    ):
+        return DTensor.from_local(
+            tensor.to_local(),
+            _cpu_checkpoint_mesh(tensor.device_mesh),
+            tensor.placements,
+            run_check=False,
+            shape=tensor.shape,
+            stride=tensor.stride(),
+        )
+    return tensor
 
 
 class PackedParameterSpec:
@@ -223,7 +259,8 @@ def split_packed_optimizer_state_for_checkpoint(model: nn.Module, state_dict: di
             for state_key, value in packed_param_state.items():
                 if isinstance(value, torch.Tensor) and value.shape == packed_info.parameter.shape:
                     for fqn, logical_view in zip(
-                        packed_info.logical_fqns, packed_info.spec.split_into_logical_views(value)
+                        packed_info.logical_fqns,
+                        packed_info.spec.split_into_logical_views(_cpu_checkpoint_tensor(value)),
                     ):
                         logical_param_states[fqn][state_key] = logical_view
                 else:
@@ -258,7 +295,12 @@ def write_back_loaded_packed_optimizer_state(
                         loaded_value = packed_info.spec.pack_logical_tensors(
                             [logical_param_state[state_key] for logical_param_state in logical_param_states]
                         )
-                    if isinstance(value, torch.Tensor):
+                    if isinstance(value, DTensor) and value.to_local().device.type == "cpu":
+                        loaded_value = loaded_value.redistribute(
+                            device_mesh=_cpu_checkpoint_mesh(value.device_mesh), placements=value.placements
+                        )
+                        value.to_local().copy_(loaded_value.to_local())
+                    elif isinstance(value, torch.Tensor):
                         value.copy_(loaded_value)
                     else:
                         state[state_key] = loaded_value

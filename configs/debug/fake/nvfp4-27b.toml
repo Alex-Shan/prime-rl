@@ -1,0 +1,38 @@
+max_steps = 5
+output_dir = "outputs/nvfp4-fake-27b"
+
+[model]
+name = "/home/shanxianzheng/Hugging_Face/Models/Qwen/Qwen3.8-27B"
+seq_len = 32768
+attn = "flash_attention_2"
+cp = 2
+offload = "optimizer"
+ac_offloading = "None"
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
+
+[model.quantization]
+type = "nvfp4"
+seed = 42
+
+[optim]
+lr = 3e-5
+offload_bucket_bytes = 4294967296
+
+[data.fake]
+batch_size = 2
+generate_samples = true
+doc_len = 32768
+
+[ckpt]
+keep_last = 2
+
+[monitors]
+prime = "None"
+wandb = "None"
+
+[monitors.file]
+compress = false
+
+[env_vars]
+PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True,pinned_max_round_threshold_mb:16"

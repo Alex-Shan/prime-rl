@@ -60,8 +60,8 @@ from prime_rl.trainer.models.layers.fp8_linear import replace_linear_with_fp8_bl
 from prime_rl.trainer.models.layers.lm_head import inject_prime_lm_head
 from prime_rl.trainer.models.layers.moe import MoE
 from prime_rl.trainer.models.layers.mxfp8_linear import replace_linear_with_mxfp8_linear
-from prime_rl.trainer.models.layers.nvfp4_linear import initialize_nvfp4_runtime, replace_linear_with_nvfp4_linear
 from prime_rl.trainer.models.layers.ngram import NGramTable
+from prime_rl.trainer.models.layers.nvfp4_linear import initialize_nvfp4_runtime, replace_linear_with_nvfp4_linear
 from prime_rl.trainer.models.qwen3_8_flash_next.indexer import SparseAttentionIndexer
 from prime_rl.trainer.moe_runtime import configure_moe_runtime
 from prime_rl.trainer.ngram_runtime import configure_ngram_runtime

@@ -214,3 +214,34 @@ def test_nvfp4_sr_tiles_preserve_codes_scales_and_philox(shape, distribution):
     )
     for old, new in zip(expected, actual):
         assert torch.equal(old.view(torch.uint8), new.view(torch.uint8))
+
+
+def test_fused_offloaded_state_uses_cpu_collectives():
+    import os
+
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor import DTensor, Shard
+
+    from prime_rl.trainer.models.fusions import PackedParameterSpec, _cpu_checkpoint_tensor
+
+    if int(os.environ.get("WORLD_SIZE", "1")) != 2:
+        pytest.skip("Run under torchrun --nproc-per-node=2")
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    dist.init_process_group("nccl")
+    try:
+        mesh = init_device_mesh("cuda", (1, 2), mesh_dim_names=("replicate", "shard"))
+        rank = dist.get_rank()
+        local = torch.arange(rank * 12, (rank + 1) * 12, dtype=torch.float32).reshape(3, 4)
+        state = DTensor.from_local(local.cuda(), mesh, [Shard(0), Shard(0)], shape=torch.Size([6, 4]), stride=(4, 1))
+        state = copy.copy(state)
+        state._local_tensor = local
+        spec = PackedParameterSpec("packed", ("a", "b"), (2, 4), 0)
+        views = spec.split_into_logical_views(_cpu_checkpoint_tensor(state))
+        expected = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+        assert torch.equal(views[0].full_tensor(), expected[:2])
+        assert torch.equal(views[1].full_tensor(), expected[2:])
+        restored = spec.pack_logical_tensors(views).redistribute(placements=state.placements)
+        assert torch.equal(restored.to_local(), local)
+    finally:
+        dist.destroy_process_group()
