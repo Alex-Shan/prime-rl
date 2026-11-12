@@ -132,6 +132,30 @@ def register_dirs(dirs: list[Path]) -> None:
 
 isolated = False
 
+# HERO: only runs under this project's outputs are listed, labelled by their path below
+# it. Defaults to <checkout>/outputs/HERO (the checkout this dashboard runs from);
+# PRIME_RL_DASHBOARD_ROOT overrides it, and an empty value turns the scoping off.
+_root_env = os.environ.get("PRIME_RL_DASHBOARD_ROOT")
+PROJECT_ROOT: Path | None = (
+    (Path(_root_env).resolve() if _root_env else None)
+    if _root_env is not None
+    else Path(__file__).resolve().parents[4] / "outputs" / "HERO"
+)
+
+
+def in_project(path: Path) -> bool:
+    return PROJECT_ROOT is None or path.resolve().is_relative_to(PROJECT_ROOT)
+
+
+def run_label(run_dir: Path) -> str:
+    """The run's path below the project root (its dir name when unscoped)."""
+    if PROJECT_ROOT is not None:
+        try:
+            return str(run_dir.resolve().relative_to(PROJECT_ROOT))
+        except ValueError:
+            pass
+    return run_dir.name
+
 
 def tracked_dirs() -> list[Path]:
     """One dashboard per user serves everything: the dirs it was started with
@@ -145,28 +169,57 @@ def tracked_dirs() -> list[Path]:
     return dirs
 
 
+MAX_SCAN_DEPTH = 6
+
+
+def walk_run_dirs(root: Path, depth: int = 0):
+    """Every run dir anywhere below the project root, found fresh on each scan, so a
+    renamed or moved folder shows up at its new path without re-registering it. A run
+    dir is not descended into (its checkpoints and logs hold no runs)."""
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+            continue
+        path = Path(entry.path)
+        if is_run_dir(path):
+            yield path
+        elif depth < MAX_SCAN_DEPTH:
+            yield from walk_run_dirs(path, depth + 1)
+
+
 def scan_runs() -> dict[str, Path]:
     global _run_registry
     by_name: dict[str, list[Path]] = {}
-    for base in tracked_dirs():
-        if not base.is_dir():
-            continue
-        for run_dir in sorted(base.iterdir()):
-            if is_run_dir(run_dir):
-                by_name.setdefault(run_dir.name, []).append(run_dir)
+    if PROJECT_ROOT is not None:
+        # scoped to the project: walk its tree instead of trusting registered dirs,
+        # which go stale the moment a parent folder is renamed
+        candidates = list(walk_run_dirs(PROJECT_ROOT))
+    else:
+        candidates = [d for base in tracked_dirs() if base.is_dir() for d in sorted(base.iterdir()) if is_run_dir(d)]
+    for run_dir in candidates:
+        by_name.setdefault(run_dir.name, []).append(run_dir)
     registry: dict[str, Path] = {}
     for name, dirs in by_name.items():
         if len(dirs) == 1:
             registry[name] = dirs[0]
         else:
-            for run_dir in dirs:
-                registry[f"{run_dir.parent.name}:{name}"] = run_dir  # ":" survives a URL path segment, "/" does not
+            qualified = {run_dir: f"{run_dir.parent.name}:{name}" for run_dir in dirs}
+            for run_dir, run_id in qualified.items():
+                if list(qualified.values()).count(run_id) > 1:
+                    digest = hashlib.sha256(str(run_dir.resolve()).encode()).hexdigest()[:12]
+                    run_id = f"{run_id}:{digest}"
+                registry[run_id] = run_dir
     _run_registry = registry
     return registry
 
 
 def get_run_dir(run: str) -> Path:
-    run_dir = _run_registry.get(run) or scan_runs().get(run)
+    run_dir = _run_registry.get(run)
+    if run_dir is None or not run_dir.is_dir():  # unknown, or its folder was renamed/moved
+        run_dir = scan_runs().get(run)
     if run_dir is None or not run_dir.is_dir():
         raise HTTPException(404, f"run {run} not found")
     return run_dir
@@ -240,8 +293,10 @@ def resolved_config_dir(run_dir: Path, attempt: str = "latest") -> Path:
 
 def main_config(run_dir: Path) -> tuple[str, dict]:
     configs = resolved_config_dir(run_dir)
-    if (configs / "sft.json").exists():
-        return "sft", read_json(configs / "sft.json")
+    # Pretraining uses the same trainer as SFT, so the dashboard shows its runs as SFT runs.
+    for name in ("sft.json", "pretrain.json"):
+        if (configs / name).exists():
+            return "sft", read_json(configs / name)
     if (configs / "orchestrator.json").exists() or (configs / "trainer.json").exists():
         return "rl", read_json(configs / "orchestrator.json") or read_json(configs / "trainer.json")
     if (configs / "eval.json").exists():
@@ -351,6 +406,8 @@ def run_meta(run_dir: Path) -> dict:
     platform = orjson.loads(platform_path.read_bytes()) if platform_path.is_file() else None
     return {
         "name": run_dir.name,
+        "label": run_label(run_dir),
+        "path": str(run_dir.resolve()),
         "type": run_type,
         "finished": finished,
         "eval_plan": eval_plan,
@@ -379,7 +436,7 @@ def list_runs() -> dict:
         meta = run_meta(run_dir)
         meta["name"] = run_id
         runs.append(meta)
-    runs.sort(key=lambda r: r["mtime"], reverse=True)
+    runs.sort(key=lambda r: (r["label"], r["path"]))
     return {"output_dir": ", ".join(str(d.resolve()) for d in output_dirs), "runs": runs}
 
 
@@ -836,16 +893,6 @@ def timeline_status(trace: dict) -> str:
     return "completed"
 
 
-def timeline_reward(trace: dict) -> float | None:
-    rewards = [reward for reward in (trace.get("rewards") or {}).values() if isinstance(reward, dict)]
-    if not rewards:
-        return None
-    return sum(
-        (reward.get("score") or 0) * (reward.get("weight") if reward.get("weight") is not None else 1)
-        for reward in rewards
-    )
-
-
 def annotation_streams(run_dir: Path) -> list[Path]:
     """The annotation streams, one chunk directory per producer, each indexed beside it."""
     directory = get_annotations_dir(run_dir)
@@ -952,9 +999,6 @@ def activity_spans(
         ended = call_time.get("end")
         usage = call.get("usage") or {}
         input_tokens, cached_tokens, output_tokens = token_usage(usage)
-        reasoning_tokens = usage.get("reasoning_tokens")
-        if reasoning_tokens is None:
-            reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
         text = " ".join(message_text(node.get("message") or {}).split())
         mask = node.get("mask")
         spans.append(
@@ -972,7 +1016,6 @@ def activity_spans(
                 "input_tokens": input_tokens,
                 "cached_tokens": cached_tokens,
                 "output_tokens": output_tokens,
-                "reasoning_tokens": reasoning_tokens,
                 "cost": usage.get("cost"),
                 "trainable": any(mask) if isinstance(mask, list) and mask else None,
             }
@@ -1004,6 +1047,20 @@ def lifecycle_spans(trace: dict) -> list[dict]:
             }
         )
     return spans
+
+
+def new_input_tokens(activities: list[dict]) -> int | None:
+    """Fed-in tokens of one call chain, counted once: each call's prompt beyond the
+    previous call's final sequence, clamped at zero (verifiers' `min_new_input_tokens`)."""
+    total = None
+    previous = 0
+    for span in sorted(activities, key=lambda span: span["call_index"]):
+        if span.get("input_tokens") is None:
+            continue
+        prompt = span["input_tokens"] + (span.get("cached_tokens") or 0)
+        total = (total or 0) + max(0, prompt - previous)
+        previous = prompt + (span.get("output_tokens") or 0)
+    return total
 
 
 def timeline_lane(
@@ -1042,14 +1099,15 @@ def timeline_lane(
         values = [span[field] for span in activities if isinstance(span.get(field), (int, float))]
         return sum(values) if values else None
 
-    input_tokens = total("input_tokens")
-    cached_tokens = total("cached_tokens")
     output_tokens = total("output_tokens")
-    reasoning_tokens = total("reasoning_tokens")
-    total_input_tokens = input_tokens + (cached_tokens or 0) if input_tokens is not None else None
-    total_tokens = (
-        total_input_tokens + output_tokens if total_input_tokens is not None and output_tokens is not None else None
-    )
+    if branch:
+        input_tokens = new_input_tokens(activities)
+    else:
+        # the trace counts input on shared branch prefixes once; its call list
+        # interleaves branches, so the lane's spans cannot reproduce that
+        input_tokens = trace.get("num_input_tokens")
+        output_tokens = trace.get("num_output_tokens", output_tokens)
+    total_tokens = input_tokens + output_tokens if input_tokens is not None and output_tokens is not None else None
     context_lengths = [
         (span.get("input_tokens") or 0) + (span.get("cached_tokens") or 0)
         for span in activities
@@ -1064,18 +1122,15 @@ def timeline_lane(
         "ended_at": ended,
         "status": status,
         "outcome": status if branch else (trace.get("stop_condition") or status),
-        "reward": timeline_reward(trace),
+        "reward": trace.get("reward") if trace.get("rewards") else None,
         "usage": {
             "model_calls": len(activities),
             "input_tokens": input_tokens,
-            "cached_tokens": cached_tokens,
-            "total_input_tokens": total_input_tokens,
             "output_tokens": output_tokens,
-            "reasoning_tokens": reasoning_tokens,
             "latest_context_tokens": context_lengths[-1] if context_lengths else None,
             "max_context_tokens": max(context_lengths, default=None),
             "total_tokens": total_tokens,
-            "cost": total("cost"),
+            "cost": total("cost") if branch else (trace.get("usage") or {}).get("cost"),
         },
         "spans": spans,
     }
@@ -1794,7 +1849,7 @@ _live_folds = LiveFolds()
 
 @app.get("/api/runs/{run}/live")
 def live_traces(run: str, etag: str | None = None) -> dict:
-    """The run's in-flight traces, folded from the env servers' streamed deltas
+    """The run's in-flight traces, folded from the env worker pools' streamed deltas
     (``monitors/file/traces/live/<trace_id>.jsonl``): one row per live trace with its
     phase, turns, tokens, cost, elapsed time and last message. A trace whose file is
     gone has finished and sits in the stream. ``etag`` is the fingerprint the client
@@ -2248,7 +2303,7 @@ def main() -> None:
         # this instance's dirs join the per-user registry, and it serves the union -
         # one dashboard per host per user covers every run
         register_dirs(output_dirs)
-    if not tracked_dirs():
+    if not tracked_dirs() and not (PROJECT_ROOT and PROJECT_ROOT.is_dir()):
         raise SystemExit("no existing output dir given" + ("" if isolated else " (and none registered)"))
     set_proc_title("Dashboard")
     port = free_port(args.host, args.port)

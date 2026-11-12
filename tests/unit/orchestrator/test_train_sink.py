@@ -13,10 +13,12 @@ from verifiers.v1.types import AssistantMessage, Tool, ToolMessage, Usage, UserM
 
 from prime_rl.configs.algorithm import GRPOAlgoConfig
 from prime_rl.configs.orchestrator import OrchestratorConfig
+from prime_rl.control.types import ConfigUpdate
 from prime_rl.orchestrator.algo.base import Algorithm
 from prime_rl.orchestrator.train_sink import TrainSink, mask_stale_tokens
 from prime_rl.orchestrator.trajectories import trace_to_samples
 from prime_rl.orchestrator.types import DispatchFailure, GroupCancellation, Progress
+from prime_rl.orchestrator.utils import episode_group_id
 from prime_rl.utils.logger import setup_logger
 
 # Samples hold numpy streams; encode them as lists to compare them byte for byte.
@@ -72,10 +74,11 @@ def episode(traces, *, group="g", version=0):
     )
 
 
-def sink(*, constant=True, admitted=True, batch_size=100):
+def sink(*, constant=True, admitted=True, batch_size=100, closed=None):
     config = OrchestratorConfig(batch_size=batch_size, constant_trainer_batch_size=constant, max_staleness=1)
     env = SimpleNamespace(
-        config=SimpleNamespace(group_size=1, sampling=SimpleNamespace(temperature=1.0)),
+        config=SimpleNamespace(group_size=1),
+        sampling_at=lambda step: vf.SamplingConfig(temperature=1.0),
         requires_sampling_masks=False,
         requires_top_logprobs=False,
         algorithm=Algorithm(GRPOAlgoConfig(), None),
@@ -87,6 +90,7 @@ def sink(*, constant=True, admitted=True, batch_size=100):
         progress=Progress(),
         batch_size=batch_size,
         on_result=lambda group: admitted,
+        on_groups_closed=closed.extend if closed is not None else None,
     )
 
 
@@ -190,6 +194,8 @@ def test_partially_stale_trace_ships_fresh_tokens():
         ]
         batch = await s.add(episode([t], version=1))
         assert batch.samples[0].mask.tolist() == [False, False, False, True]
+        # Batch 4 trains on v3: the unlabelled token took dispatch version v1.
+        assert batch.samples[0].staleness.tolist() == [-1, -1, 2, 0]
         assert s.take_rollout_window(force=True).metrics.to_dict()["staleness/token/masked"] == 0.5
 
     asyncio.run(run())
@@ -261,5 +267,78 @@ def test_partial_window_and_shutdown_release():
         assert window.attempts == 1
         assert window.metrics.to_dict()["rollout/queued/cancelled"] == 1
         assert s.take_rollout_window(force=True) is None
+
+    asyncio.run(run())
+
+
+def test_reconfigure_applies_new_batch_size_and_staleness():
+    async def run():
+        s = sink(batch_size=4)
+        await s.add(episode([trace()], group="a"))
+        await s.add(episode([trace()], group="b"))
+        config = OrchestratorConfig(batch_size=2, max_staleness=1)
+        s.reconfigure(ConfigUpdate(revision=1, step=1, config=config, changes=()))
+        assert len((await s.take_batch()).samples) == 2
+
+        s.progress.step = 2
+        await s.add(episode([trace()], group="c"))
+        config = OrchestratorConfig(batch_size=2, max_staleness=0)
+        s.reconfigure(ConfigUpdate(revision=2, step=2, config=config, changes=()))
+        await s.take_batch()
+        assert not s.pending_batch
+
+    asyncio.run(run())
+
+
+def test_groups_close_when_they_finalize_without_shipping():
+    async def run():
+        closed = []
+        rejected = sink(admitted=False, closed=closed)
+        await rejected.add(episode([trace()], group="rejected"))
+        assert closed == ["rejected"]
+
+        s = sink(batch_size=2, closed=closed)
+        await s.add(episode([trace(ok=False)], group="failed"))
+        await s.cancel(GroupCancellation("train", "test", "overload", 1, 1, "overload"))
+        assert closed == ["rejected", "failed", "overload"]
+
+        # A shutdown drop re-runs on resume, so the group stays open.
+        await s.cancel(GroupCancellation("train", "test", "shutdown", 1, 1, "shutdown"))
+        assert closed == ["rejected", "failed", "overload"]
+
+        s.progress.step = 4
+        await s.add(episode([trace()], group="stale"))
+        assert closed[-1] == "stale" and not s.pending_batch
+
+        closed.clear()
+        pruned = sink(constant=False, batch_size=1, closed=closed)
+        batch = await pruned.add(episode([trace(advantage=0)], group="pruned"))
+        assert not batch.samples and closed == ["pruned"]
+
+    asyncio.run(run())
+
+
+def test_shipped_groups_close_when_the_consumer_ships_them():
+    async def run():
+        closed = []
+        s = sink(constant=False, batch_size=2, closed=closed)
+        batch = await s.add(episode([trace(), trace(advantage=0), trace()], group="partial"))
+        assert len(batch.samples) == 1 and len(s.pending_batch) == 1
+        assert {episode_group_id(episode) for episode in batch.cohort.episodes} == {"partial"}
+        # Taking the batch does not close it: a batch that never ships re-runs on resume.
+        assert closed == []
+        s.shipped(batch)
+        assert closed == ["partial"]
+
+    asyncio.run(run())
+
+
+def test_unshipped_groups_stay_open_at_shutdown():
+    async def run():
+        closed = []
+        s = sink(constant=False, batch_size=2, closed=closed)
+        await s.add(episode([trace(), trace(advantage=0), trace()], group="partial"))
+        s.discard_queued()
+        assert closed == []
 
     asyncio.run(run())

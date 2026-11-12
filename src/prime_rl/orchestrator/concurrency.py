@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from prime_rl.configs.orchestrator import ConcurrencyConfig
+from prime_rl.control.types import ConfigUpdate, Reconfigurable
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.utils import format_num
 
@@ -46,16 +47,16 @@ BINDING_FRACTION = 0.9
 """The cap counts as binding when inflight reaches this fraction of it."""
 
 
-KV_USAGE_SOFT_CAP = 0.8
+KV_USAGE_SOFT_CAP = 0.9
 """Above this usage, soft-trim: lower the cap and let completions drain the
 pool naturally — no work is cancelled."""
 
-KV_USAGE_HARD_CAP = 0.9
+KV_USAGE_HARD_CAP = 0.95
 """Above this usage, hard-trim: in-place context growth is outpacing
 completions despite the closed gate, so also cancel the pool excess before
 thrash onset (a cliff, not a slope)."""
 
-KV_USAGE_TARGET = 0.7
+KV_USAGE_TARGET = 0.85
 """A trim resizes to inflight * target / usage — below the trigger, so pool growth has headroom before the next trim."""
 
 KV_TRIM_COOLDOWN_POLLS = 6
@@ -113,7 +114,7 @@ class EngineLoadSample:
     preemptions_delta: int
 
 
-class ConcurrencyController:
+class ConcurrencyController(Reconfigurable):
     def __init__(self, config: ConcurrencyConfig, *, fallback_cost: int) -> None:
         self.config = config
         self.floor = config.min_inflight
@@ -304,6 +305,17 @@ class ConcurrencyController:
         self.target = target
         self.cap = float(target) if target is not None else self.clamp(self.cap)
         self.apply_limit(int(self.cap), reason="manual target" if target is not None else "adaptive")
+
+    def reconfigure(self, update: ConfigUpdate) -> None:
+        """Move the band and clamp the cap into it. A manual target stays pinned, and a lower
+        cap cancels nothing: admission waits for the pool to drain below it. ``initial_inflight``
+        only seeds the startup cap, so a new value (e.g. to stay below a lowered
+        ``max_inflight``) changes nothing."""
+        self.config = update.config.concurrency
+        self.floor = self.config.min_inflight
+        if self.target is None:
+            self.cap = self.clamp(self.cap)
+            self.apply_limit(int(self.cap), reason="config update")
 
     # ── internals ────────────────────────────────────────────────────────────
 
